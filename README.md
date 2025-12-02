@@ -16,8 +16,8 @@ Complete end-to-end data pipeline using EC2, Apache Airflow, Databricks, and Ter
 
 ### Prerequisites
 
-- AWS Account (credentials provided: `[your-key]`)
-- Databricks Account with workspace (`[your-workspace-url]`)
+- AWS Account with credentials stored securely (do NOT commit credentials)
+- Databricks Account with workspace URL
 - Terraform v1.0+ installed
 - SSH key pair
 
@@ -40,7 +40,7 @@ Complete end-to-end data pipeline using EC2, Apache Airflow, Databricks, and Ter
    ```bash
    nano terraform/terraform.tfvars
    # Update:
-   # - databricks_host: [your-workspace-url]
+   # - databricks_host: [your-databricks-workspace-url]
    # - databricks_token: [your-databricks-token]
    # - public_key_path: ~/.ssh/airflow-key.pub
    ```
