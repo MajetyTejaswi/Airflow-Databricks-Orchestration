@@ -1,0 +1,319 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      Environment = var.environment
+      Project     = "airflow-databricks"
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+# Create VPC
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name = "airflow-vpc"
+  }
+}
+
+# Create Internet Gateway
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "airflow-igw"
+  }
+}
+
+# Create Public Subnet
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidr
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "airflow-public-subnet"
+  }
+}
+
+# Create Route Table
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block      = "0.0.0.0/0"
+    gateway_id      = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "airflow-route-table"
+  }
+}
+
+# Associate Route Table with Subnet
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+# Create Security Group
+resource "aws_security_group" "airflow" {
+  name        = "airflow-sg"
+  description = "Security group for Airflow EC2 instance"
+  vpc_id      = aws_vpc.main.id
+
+  # Allow HTTP
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow HTTPS
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow SSH
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow Airflow Web UI (8080)
+  ingress {
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow all outbound traffic
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "airflow-sg"
+  }
+}
+
+# Create IAM Role for EC2
+resource "aws_iam_role" "airflow_ec2_role" {
+  name = "airflow-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "airflow-ec2-role"
+  }
+}
+
+# Create IAM Policy for Databricks and S3 access
+resource "aws_iam_role_policy" "airflow_ec2_policy" {
+  name = "airflow-ec2-policy"
+  role = aws_iam_role.airflow_ec2_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Create IAM Instance Profile
+resource "aws_iam_instance_profile" "airflow_profile" {
+  name = "airflow-instance-profile"
+  role = aws_iam_role.airflow_ec2_role.name
+}
+
+# Get latest Ubuntu AMI
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# Get available AZs
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# Create EC2 Instance
+resource "aws_instance" "airflow" {
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.airflow.id]
+  iam_instance_profile   = aws_iam_instance_profile.airflow_profile.name
+  key_name               = aws_key_pair.deployer.key_name
+
+  # Add bootstrap script
+  user_data = base64encode(file("${path.module}/../scripts/bootstrap.sh"))
+
+  root_block_device {
+    volume_type           = "gp3"
+    volume_size           = var.root_volume_size
+    delete_on_termination = true
+  }
+
+  monitoring = true
+
+  tags = {
+    Name = "airflow-server"
+  }
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# Create Key Pair for SSH access
+resource "aws_key_pair" "deployer" {
+  key_name   = "airflow-deployer-key"
+  public_key = file(var.public_key_path)
+
+  tags = {
+    Name = "airflow-key-pair"
+  }
+}
+
+# Create Secrets Manager secret for Databricks credentials
+resource "aws_secretsmanager_secret" "databricks_credentials" {
+  name                    = "airflow/databricks-credentials"
+  recovery_window_in_days = 7
+
+  tags = {
+    Name = "databricks-credentials"
+  }
+}
+
+# Store Databricks credentials in Secrets Manager
+resource "aws_secretsmanager_secret_version" "databricks_credentials" {
+  secret_id = aws_secretsmanager_secret.databricks_credentials.id
+  secret_string = jsonencode({
+    host       = var.databricks_host
+    token      = var.databricks_token
+  })
+}
+
+# Create S3 bucket for logs and data
+resource "aws_s3_bucket" "airflow_logs" {
+  bucket = "airflow-logs-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
+
+  tags = {
+    Name = "airflow-logs-bucket"
+  }
+}
+
+# Enable versioning on S3 bucket
+resource "aws_s3_bucket_versioning" "airflow_logs" {
+  bucket = aws_s3_bucket.airflow_logs.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Get current AWS account ID
+data "aws_caller_identity" "current" {}
+
+# Output information
+output "ec2_public_ip" {
+  value       = aws_instance.airflow.public_ip
+  description = "Public IP of the Airflow EC2 instance"
+}
+
+output "ec2_public_dns" {
+  value       = aws_instance.airflow.public_dns
+  description = "Public DNS of the Airflow EC2 instance"
+}
+
+output "airflow_web_ui_url" {
+  value       = "http://${aws_instance.airflow.public_ip}:8080"
+  description = "Airflow Web UI URL"
+}
+
+output "s3_bucket_name" {
+  value       = aws_s3_bucket.airflow_logs.id
+  description = "S3 bucket for Airflow logs"
+}
+
+output "ssh_command" {
+  value       = "ssh -i <path-to-key> ubuntu@${aws_instance.airflow.public_ip}"
+  description = "SSH command to connect to the instance"
+}

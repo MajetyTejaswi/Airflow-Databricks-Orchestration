@@ -1,0 +1,13 @@
+# Python requirements for Airflow development
+# Note: The bootstrap script installs these packages automatically on EC2
+
+apache-airflow==2.7.3
+apache-airflow-providers-databricks==4.3.0
+apache-airflow-providers-http==4.4.2
+apache-airflow-providers-amazon==8.5.0
+requests==2.31.0
+python-dotenv==1.0.0
+
+# Development/Local testing (optional)
+pytest==7.4.0
+pytest-cov==4.1.0

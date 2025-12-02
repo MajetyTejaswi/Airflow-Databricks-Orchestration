@@ -1,0 +1,353 @@
+name: Deploy Airflow Infrastructure & DAGs
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'airflow-dags/**'
+      - 'terraform/**'
+      - '.github/workflows/deploy.yml'
+      - 'requirements.txt'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:  # Manual trigger
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: 1.6.0
+
+jobs:
+  # Job 1: Validate Terraform
+  validate-terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+        run: |
+          cd terraform
+          terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: |
+          cd terraform
+          terraform init -backend=false
+          terraform validate
+
+  # Job 2: Validate DAGs
+  validate-dags:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install apache-airflow==2.7.3
+          pip install apache-airflow-providers-databricks==4.3.0
+
+      - name: Validate DAGs syntax
+        run: |
+          export AIRFLOW_HOME=$(pwd)/airflow_test
+          mkdir -p $AIRFLOW_HOME
+          airflow db init --quiet 2>/dev/null || true
+          
+          for dag_file in airflow-dags/*.py; do
+            echo "Validating $dag_file..."
+            python -m py_compile "$dag_file"
+          done
+          
+          echo "All DAGs validated successfully!"
+
+      - name: Check DAG imports
+        run: |
+          python3 << 'EOF'
+          import sys
+          import os
+          sys.path.insert(0, os.getcwd())
+          
+          dag_files = [f for f in os.listdir('airflow-dags') if f.endswith('.py')]
+          
+          for dag_file in dag_files:
+              print(f"Checking imports in {dag_file}...")
+              try:
+                  with open(f'airflow-dags/{dag_file}', 'r') as f:
+                      exec(compile(f.read(), dag_file, 'exec'), {'__name__': '__main__'})
+                  print(f"  ✓ {dag_file} imports OK")
+              except Exception as e:
+                  print(f"  ✗ {dag_file} import error: {e}")
+                  sys.exit(1)
+          EOF
+
+  # Job 3: Plan Terraform
+  plan-terraform:
+    needs: validate-terraform
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/develop'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Plan
+        run: |
+          cd terraform
+          terraform init
+          terraform plan -out=tfplan -no-color
+          
+      - name: Comment PR with plan
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/tfplan', 'utf8');
+            const comment = `## Terraform Plan\n\n\`\`\`\n${plan}\n\`\`\``;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment.substring(0, 65536) // GitHub comment limit
+            });
+
+  # Job 4: Deploy Infrastructure (only on main branch)
+  deploy-infrastructure:
+    needs: [validate-terraform, validate-dags]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply -auto-approve -no-color
+          
+          # Save outputs
+          terraform output -json > /tmp/tf-outputs.json
+          cat /tmp/tf-outputs.json
+
+      - name: Upload Terraform outputs
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-outputs
+          path: /tmp/tf-outputs.json
+
+      - name: Notify deployment success
+        run: |
+          echo "✓ Infrastructure deployed successfully!"
+          cd terraform
+          echo "EC2 IP: $(terraform output -raw ec2_public_ip 2>/dev/null || echo 'N/A')"
+
+  # Job 5: Deploy DAGs to EC2
+  deploy-dags:
+    needs: [validate-dags, deploy-infrastructure]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Terraform outputs
+        uses: actions/download-artifact@v3
+        with:
+          name: terraform-outputs
+
+      - name: Extract EC2 IP
+        id: get-ec2-ip
+        run: |
+          EC2_IP=$(cat /tmp/tf-outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4)
+          echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
+          echo "EC2 IP: $EC2_IP"
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/airflow-key
+          chmod 600 ~/.ssh/airflow-key
+          ssh-keyscan -H ${{ steps.get-ec2-ip.outputs.ec2_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Wait for EC2 to be ready
+        run: |
+          for i in {1..30}; do
+            if ssh -i ~/.ssh/airflow-key -o ConnectTimeout=5 ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "echo 'EC2 is ready'" 2>/dev/null; then
+              echo "✓ EC2 is ready"
+              break
+            fi
+            echo "Attempt $i: Waiting for EC2..."
+            sleep 10
+          done
+
+      - name: Deploy DAGs to EC2
+        run: |
+          scp -i ~/.ssh/airflow-key -r airflow-dags/* ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }}:/home/airflow/airflow/dags/
+          echo "✓ DAGs deployed to EC2"
+
+      - name: Deploy Notebooks to EC2
+        run: |
+          scp -i ~/.ssh/airflow-key -r databricks-notebooks/* ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }}:/tmp/databricks-notebooks/
+          echo "✓ Notebooks staged on EC2"
+
+      - name: Restart Airflow services
+        run: |
+          ssh -i ~/.ssh/airflow-key ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} << 'EOF'
+          echo "Restarting Airflow services..."
+          sudo systemctl restart airflow-scheduler
+          sudo systemctl restart airflow-webserver
+          
+          # Wait for services to start
+          sleep 10
+          
+          # Verify services
+          sudo systemctl status airflow-scheduler --no-pager
+          sudo systemctl status airflow-webserver --no-pager
+          
+          echo "✓ Airflow services restarted"
+          EOF
+
+  # Job 6: Sync DAGs via Git (Alternative method)
+  sync-dags-git:
+    needs: [validate-dags]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH for Git sync
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/airflow-key
+          chmod 600 ~/.ssh/airflow-key
+
+      - name: Trigger Git sync on EC2
+        run: |
+          EC2_IP=$(cat terraform-outputs/tf-outputs.json 2>/dev/null | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4)
+          
+          if [ -z "$EC2_IP" ]; then
+            echo "Skipping Git sync - EC2 IP not available"
+            exit 0
+          fi
+          
+          ssh -i ~/.ssh/airflow-key ubuntu@$EC2_IP << 'EOF'
+          cd /home/airflow/airflow/dags
+          git pull origin main
+          echo "✓ DAGs synced from Git"
+          EOF
+
+  # Job 7: Validate deployment
+  validate-deployment:
+    needs: [deploy-dags]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Terraform outputs
+        uses: actions/download-artifact@v3
+        with:
+          name: terraform-outputs
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/airflow-key
+          chmod 600 ~/.ssh/airflow-key
+
+      - name: Validate DAGs on EC2
+        run: |
+          EC2_IP=$(cat /tmp/tf-outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4)
+          
+          ssh -i ~/.ssh/airflow-key ubuntu@$EC2_IP << 'EOF'
+          export AIRFLOW_HOME=/home/airflow/airflow
+          source $AIRFLOW_HOME/venv/bin/activate
+          
+          echo "Validating DAGs..."
+          airflow dags validate
+          
+          echo "Listing DAGs..."
+          airflow dags list
+          EOF
+
+      - name: Create deployment summary
+        run: |
+          echo "## Deployment Summary ✓" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Infrastructure**: Deployed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- **DAGs**: Synced to EC2 and validated" >> $GITHUB_STEP_SUMMARY
+          echo "- **Services**: Airflow restarted" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          EC2_IP=$(cat /tmp/tf-outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4)
+          echo "**Access Airflow**: http://$EC2_IP:8080" >> $GITHUB_STEP_SUMMARY
+
+  # Job 8: Notify on failure
+  notify-failure:
+    runs-on: ubuntu-latest
+    if: failure()
+    needs: [validate-terraform, validate-dags]
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+          payload: |
+            {
+              "text": "❌ Airflow Deployment Failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deployment Failed* 🚨\n*Repository*: ${{ github.repository }}\n*Branch*: ${{ github.ref }}\n*Commit*: ${{ github.sha }}"
+                  }
+                }
+              ]
+            }
+        if: always()

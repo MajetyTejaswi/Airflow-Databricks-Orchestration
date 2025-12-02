@@ -1,0 +1,47 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+.terraform/
+.terraform.lock.hcl
+tfplan
+
+# Airflow
+logs/
+airflow.db
+airflow-webserver.log
+*.pid
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+venv/
+env/
+
+# SSH Keys
+ssh-keys/
+*.pem
+*.pub
+
+# AWS
+.aws/
+aws-credentials.txt
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
