@@ -1,5 +1,13 @@
 #!/bin/bash
-set -e
+# IMPORTANT: This script runs as user_data on EC2 startup
+# Content-Type: text/x-shellscript; charset="us-ascii"
+set -ex
+
+# Wait for cloud-init to complete
+while [ ! -f /var/lib/cloud/instance/boot-finished ]; do
+    echo "Waiting for cloud-init to complete..."
+    sleep 5
+done
 
 # Redirect output to log file
 exec > >(tee -a /var/log/airflow-bootstrap.log)
@@ -7,6 +15,7 @@ exec 2>&1
 
 echo "==================================="
 echo "Starting Airflow Bootstrap: $(date)"
+echo "Host: $(hostname)"
 echo "==================================="
 
 # Update system packages
@@ -66,6 +75,8 @@ echo "✓ Airflow installed"
 
 echo "Installing Airflow providers..."
 pip install apache-airflow-providers-http==4.4.2
+# Fix flask-session compatibility issue
+pip install 'flask-session<0.6'
 echo "✓ Providers installed"
 
 # Initialize Airflow database
@@ -73,81 +84,100 @@ echo "Initializing Airflow database..."
 airflow db init
 echo "✓ Database initialized"
 
-# Create Airflow admin user (default credentials - CHANGE IN PRODUCTION)
-airflow users create \
-    --username admin \
-    --firstname Admin \
-    --lastname User \
-    --role Admin \
-    --email admin@example.com \
-    --password admin123 || true
-
 # Create DAGs directory
 mkdir -p $AIRFLOW_HOME/dags
 mkdir -p $AIRFLOW_HOME/logs
 mkdir -p $AIRFLOW_HOME/plugins
 
-# Clone the DAGs from GitHub (if using Git integration)
+# Deploy DAGs from GitHub repository
 cd $AIRFLOW_HOME/dags
+echo "Downloading DAGs from GitHub..."
 
-# Try to clone from GitHub repository
-# Replace YOUR_USERNAME/YOUR_REPO with your actual repository
-if [ ! -z "$GITHUB_REPO_URL" ]; then
-  echo "Cloning DAGs from GitHub: $GITHUB_REPO_URL"
-  git clone "$GITHUB_REPO_URL" .
-elif [ ! -z "$CI_REPOSITORY_URL" ]; then
-  # For GitLab CI
-  echo "Cloning DAGs from GitLab: $CI_REPOSITORY_URL"
-  git clone "$CI_REPOSITORY_URL" .
-else
-  echo "No Git repo configured - Creating empty dags directory"
-  git init
-fi
+# Download DAG files directly from the repository
+# Using raw GitHub content URL
+GITHUB_REPO="MajetyTejaswi/Airflow-Databricks-Orchestration"
+GITHUB_BRANCH="main"
 
-# Set git user for future commits (if needed)
-git config --global user.email "airflow@company.com" || true
-git config --global user.name "Airflow Bot" || true
+# Download the DAG file
+curl -sSL "https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/airflow-dags/databricks_etl_pipeline.py" -o databricks_etl_pipeline.py || {
+  echo "Failed to download DAG from GitHub, creating placeholder..."
+  cat > databricks_etl_pipeline.py << 'DAGFILE'
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
 
-# Create a periodic Git sync script
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
+
+with DAG(
+    'databricks_etl_pipeline',
+    default_args=default_args,
+    description='Sample ETL Pipeline',
+    schedule_interval=timedelta(days=1),
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=['etl', 'databricks'],
+) as dag:
+
+    def sample_task():
+        print("Running sample ETL task")
+        return "Task completed successfully"
+
+    task = PythonOperator(
+        task_id='sample_etl_task',
+        python_callable=sample_task,
+    )
+DAGFILE
+}
+
+echo "✓ DAGs deployed"
+ls -la $AIRFLOW_HOME/dags/
+
+# Set proper ownership
+chown -R airflow:airflow $AIRFLOW_HOME/dags/
+
+# Create a periodic DAG sync script to pull latest from GitHub
 mkdir -p $AIRFLOW_HOME/scripts
-cat > $AIRFLOW_HOME/scripts/sync-dags-git.sh << 'GIT_SYNC_SCRIPT'
+cat > $AIRFLOW_HOME/scripts/sync-dags.sh << 'SYNC_SCRIPT'
 #!/bin/bash
 # Sync DAGs from GitHub every 30 minutes
 
 AIRFLOW_HOME=/home/airflow/airflow
 DAGS_FOLDER=$AIRFLOW_HOME/dags
-GIT_LOG=$AIRFLOW_HOME/logs/git-sync.log
+SYNC_LOG=$AIRFLOW_HOME/logs/dag-sync.log
 
+GITHUB_REPO="MajetyTejaswi/Airflow-Databricks-Orchestration"
+GITHUB_BRANCH="main"
+
+echo "[$(date)] Starting DAG sync from GitHub..." >> $SYNC_LOG
+
+# Download latest DAG files
 cd $DAGS_FOLDER
+curl -sSL "https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/airflow-dags/databricks_etl_pipeline.py" -o databricks_etl_pipeline.py.new 2>> $SYNC_LOG
 
-# Check if git is initialized
-if [ ! -d .git ]; then
-  echo "[$(date)] ERROR: Git not initialized in $DAGS_FOLDER" >> $GIT_LOG
-  exit 1
-fi
-
-# Pull latest changes
-echo "[$(date)] Starting Git sync..." >> $GIT_LOG
-
-git fetch origin 2>&1 | tee -a $GIT_LOG
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-git pull origin $CURRENT_BRANCH 2>&1 | tee -a $GIT_LOG
-
-# Check if there are new DAGs
-if git diff --quiet HEAD~1..HEAD airflow-dags/ 2>/dev/null; then
-  echo "[$(date)] No DAG changes detected" >> $GIT_LOG
+# Check if file changed
+if ! cmp -s databricks_etl_pipeline.py databricks_etl_pipeline.py.new 2>/dev/null; then
+  mv databricks_etl_pipeline.py.new databricks_etl_pipeline.py
+  echo "[$(date)] DAG files updated - Restarting scheduler" >> $SYNC_LOG
+  sudo systemctl restart airflow-scheduler 2>&1 | tee -a $SYNC_LOG
 else
-  echo "[$(date)] DAG changes detected - Reloading Airflow scheduler" >> $GIT_LOG
-  sudo systemctl reload airflow-scheduler 2>&1 | tee -a $GIT_LOG
+  rm -f databricks_etl_pipeline.py.new
+  echo "[$(date)] No DAG changes detected" >> $SYNC_LOG
 fi
 
-echo "[$(date)] Git sync completed" >> $GIT_LOG
-GIT_SYNC_SCRIPT
+echo "[$(date)] DAG sync completed" >> $SYNC_LOG
+SYNC_SCRIPT
 
-chmod +x $AIRFLOW_HOME/scripts/sync-dags-git.sh
+chmod +x $AIRFLOW_HOME/scripts/sync-dags.sh
 
 # Add cron job for periodic DAG sync
-echo "*/30 * * * * airflow $AIRFLOW_HOME/scripts/sync-dags-git.sh" | crontab -
+(crontab -l 2>/dev/null || true; echo "*/30 * * * * $AIRFLOW_HOME/scripts/sync-dags.sh") | crontab -
 
 # Update Airflow configuration
 cat > $AIRFLOW_HOME/airflow.cfg << 'AIRFLOW_CFG'
@@ -156,7 +186,7 @@ dags_folder = /home/airflow/airflow/dags
 base_log_folder = /home/airflow/airflow/logs
 load_examples = False
 load_default_connections = False
-executor = LocalExecutor
+executor = SequentialExecutor
 database_backend = sqlite
 sql_alchemy_conn = sqlite:////home/airflow/airflow/airflow.db
 
@@ -171,6 +201,22 @@ remote_logging = False
 [scheduler]
 catchup_by_default = False
 AIRFLOW_CFG
+
+# Re-initialize database with correct config
+echo "Re-initializing Airflow database with correct executor..."
+airflow db init
+echo "✓ Database re-initialized"
+
+# Create admin user
+echo "Creating admin user..."
+airflow users create \
+    --username admin \
+    --firstname Admin \
+    --lastname User \
+    --role Admin \
+    --email admin@example.com \
+    --password admin123 || true
+echo "✓ Admin user created"
 
 EOF
 
@@ -234,7 +280,12 @@ echo "Verifying services..."
 systemctl status airflow-webserver --no-pager || true
 systemctl status airflow-scheduler --no-pager || true
 
+# Create completion marker
+touch /var/log/airflow-bootstrap-complete
+
 # Log complete
 echo "==================================="
 echo "Airflow bootstrap completed: $(date)"
+echo "Web UI: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):8080"
+echo "Username: admin | Password: admin123"
 echo "==================================="
