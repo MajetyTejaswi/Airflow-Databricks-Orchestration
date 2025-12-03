@@ -222,7 +222,7 @@ resource "aws_instance" "airflow" {
   key_name               = aws_key_pair.deployer.key_name
 
   # Add bootstrap script
-  user_data = base64encode(file("${path.module}/../scripts/bootstrap.sh"))
+  user_data = file("${path.module}/../scripts/bootstrap.sh")
 
   root_block_device {
     volume_type           = "gp3"
