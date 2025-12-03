@@ -56,8 +56,8 @@ resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
   route {
-    cidr_block      = "0.0.0.0/0"
-    gateway_id      = aws_internet_gateway.main.id
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
   }
 
   tags = {
@@ -266,8 +266,8 @@ resource "aws_secretsmanager_secret" "databricks_credentials" {
 resource "aws_secretsmanager_secret_version" "databricks_credentials" {
   secret_id = aws_secretsmanager_secret.databricks_credentials.id
   secret_string = jsonencode({
-    host       = var.databricks_host
-    token      = var.databricks_token
+    host  = var.databricks_host
+    token = var.databricks_token
   })
 }
 
