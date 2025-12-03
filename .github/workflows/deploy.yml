@@ -20,7 +20,6 @@ env:
   TERRAFORM_VERSION: 1.6.0
   PYTHON_VERSION: '3.11'
   AIRFLOW_VERSION: 2.7.3
-  DATABRICKS_PROVIDER_VERSION: 4.3.0
 
 jobs:
   # Job 1: Validate Terraform
@@ -63,7 +62,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install apache-airflow==${{ env.AIRFLOW_VERSION }}
-          pip install apache-airflow-providers-databricks==${{ env.DATABRICKS_PROVIDER_VERSION }}
 
       - name: Validate DAGs syntax
         run: |
@@ -276,15 +274,12 @@ jobs:
           EC2_IP=$(terraform output -raw ec2_public_ip 2>/dev/null || echo 'N/A')
           echo "EC2 IP: $EC2_IP"
 
-  # Job 5.5: Start AWS Services
-  start-aws-services:
+  # Job 5.5: Wait for EC2 to be ready
+  wait-for-ec2:
     needs: [deploy-infrastructure]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -297,105 +292,38 @@ jobs:
         with:
           name: terraform-outputs
 
-      - name: Extract EC2 Instance ID
-        id: get-instance-id
+      - name: Wait for EC2 to be ready
         run: |
           INSTANCE_ID=$(cat outputs.json | jq -r '.ec2_instance_id.value // empty' 2>/dev/null || echo "")
+          
           if [ -z "$INSTANCE_ID" ]; then
-            INSTANCE_ID=$(cat outputs.json | grep -o '"ec2_instance_id": "[^"]*"' | cut -d'"' -f4 || echo "")
+            echo "⚠ EC2 Instance ID not found in outputs"
+            exit 0
           fi
-          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "Instance ID: $INSTANCE_ID"
-
-      - name: Start EC2 Instance
-        if: steps.get-instance-id.outputs.instance_id != ''
-        run: |
-          INSTANCE_ID=${{ steps.get-instance-id.outputs.instance_id }}
-          echo "Starting EC2 instance: $INSTANCE_ID"
           
-          aws ec2 start-instances --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+          echo "Checking EC2 instance: $INSTANCE_ID"
           
-          echo "Waiting for instance to be running..."
-          aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+          # Check if instance is running
+          STATE=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }} --query 'Reservations[0].Instances[0].State.Name' --output text)
+          echo "Current state: $STATE"
+          
+          if [ "$STATE" != "running" ]; then
+            echo "Starting EC2 instance..."
+            aws ec2 start-instances --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }} || true
+            aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+          fi
+          
           echo "✓ EC2 instance is running"
-
-      - name: Get RDS Instance Identifier
-        id: get-rds-id
-        run: |
-          RDS_ID=$(cat outputs.json | jq -r '.rds_instance_id.value // empty' 2>/dev/null || echo "")
-          if [ -z "$RDS_ID" ]; then
-            RDS_ID=$(cat outputs.json | grep -o '"rds_instance_id": "[^"]*"' | cut -d'"' -f4 || echo "")
-          fi
-          echo "rds_id=$RDS_ID" >> $GITHUB_OUTPUT
-          echo "RDS ID: $RDS_ID"
-
-      - name: Start RDS Instance
-        if: steps.get-rds-id.outputs.rds_id != ''
-        run: |
-          RDS_ID=${{ steps.get-rds-id.outputs.rds_id }}
-          echo "Starting RDS instance: $RDS_ID"
           
-          aws rds start-db-instances --db-instance-identifier $RDS_ID --region ${{ env.AWS_REGION }} || echo "RDS instance may already be running"
+          # Wait for status checks
+          echo "Waiting for instance status checks..."
+          aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "Status checks taking longer than expected, continuing anyway..."
           
-          echo "Waiting for RDS instance to be available..."
-          aws rds wait db-instance-available --db-instance-identifier $RDS_ID --region ${{ env.AWS_REGION }} 2>/dev/null || true
-          echo "✓ RDS instance is available"
-
-      - name: Get ECS Cluster Name
-        id: get-ecs-cluster
-        run: |
-          ECS_CLUSTER=$(cat outputs.json | jq -r '.ecs_cluster_name.value // empty' 2>/dev/null || echo "")
-          if [ -z "$ECS_CLUSTER" ]; then
-            ECS_CLUSTER=$(cat outputs.json | grep -o '"ecs_cluster_name": "[^"]*"' | cut -d'"' -f4 || echo "")
-          fi
-          echo "ecs_cluster=$ECS_CLUSTER" >> $GITHUB_OUTPUT
-          echo "ECS Cluster: $ECS_CLUSTER"
-
-      - name: Start ECS Services
-        if: steps.get-ecs-cluster.outputs.ecs_cluster != ''
-        run: |
-          CLUSTER=${{ steps.get-ecs-cluster.outputs.ecs_cluster }}
-          echo "Starting ECS services in cluster: $CLUSTER"
-          
-          # Get all services in the cluster
-          SERVICES=$(aws ecs list-services --cluster $CLUSTER --region ${{ env.AWS_REGION }} --query 'serviceArns[]' --output text 2>/dev/null || echo "")
-          
-          if [ -z "$SERVICES" ]; then
-            echo "ℹ No ECS services found in cluster"
-          else
-            for SERVICE_ARN in $SERVICES; do
-              SERVICE_NAME=$(echo $SERVICE_ARN | cut -d'/' -f3)
-              echo "Updating service: $SERVICE_NAME"
-              aws ecs update-service --cluster $CLUSTER --service $SERVICE_ARN --force-new-deployment --region ${{ env.AWS_REGION }} >/dev/null || true
-            done
-            echo "✓ ECS services updated"
-          fi
-
-      - name: Check ElastiCache Status
-        run: |
-          CACHE_CLUSTERS=$(aws elasticache describe-cache-clusters --region ${{ env.AWS_REGION }} --query 'CacheClusters[*].[CacheClusterId,CacheClusterStatus]' --output text 2>/dev/null || echo "")
-          
-          if [ -z "$CACHE_CLUSTERS" ]; then
-            echo "ℹ No ElastiCache clusters found"
-          else
-            echo "ElastiCache Status:"
-            echo "$CACHE_CLUSTERS" | while read CLUSTER_ID STATUS; do
-              echo "  - $CLUSTER_ID: $STATUS"
-            done
-          fi
-
-      - name: Create AWS Services Summary
-        run: |
-          echo "## AWS Services Status ✓" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Started Services:" >> $GITHUB_STEP_SUMMARY
-          [ ! -z "${{ steps.get-instance-id.outputs.instance_id }}" ] && echo "- ✓ EC2 Instance: ${{ steps.get-instance-id.outputs.instance_id }}" >> $GITHUB_STEP_SUMMARY
-          [ ! -z "${{ steps.get-rds-id.outputs.rds_id }}" ] && echo "- ✓ RDS Database: ${{ steps.get-rds-id.outputs.rds_id }}" >> $GITHUB_STEP_SUMMARY
-          [ ! -z "${{ steps.get-ecs-cluster.outputs.ecs_cluster }}" ] && echo "- ✓ ECS Cluster: ${{ steps.get-ecs-cluster.outputs.ecs_cluster }}" >> $GITHUB_STEP_SUMMARY
+          echo "✓ EC2 instance is ready"
 
   # Job 5: Deploy DAGs to EC2
   deploy-dags:
-    needs: [validate-dags, start-aws-services]
+    needs: [validate-dags, wait-for-ec2]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
@@ -471,7 +399,7 @@ jobs:
 
   # Job 6: Sync DAGs via Git (Alternative method)
   sync-dags-git:
-    needs: [validate-dags, start-aws-services]
+    needs: [validate-dags, wait-for-ec2]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
@@ -579,7 +507,7 @@ jobs:
   notify-failure:
     runs-on: ubuntu-latest
     if: failure()
-    needs: [validate-terraform, validate-dags, deploy-infrastructure, start-aws-services]
+    needs: [validate-terraform, validate-dags, deploy-infrastructure, wait-for-ec2]
     steps:
       - name: Send Slack notification
         uses: slackapi/slack-github-action@v1.24.0
