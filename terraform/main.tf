@@ -252,25 +252,6 @@ resource "aws_key_pair" "deployer" {
   }
 }
 
-# Create Secrets Manager secret for Databricks credentials
-resource "aws_secretsmanager_secret" "databricks_credentials" {
-  name                    = "airflow/databricks-credentials"
-  recovery_window_in_days = 7
-
-  tags = {
-    Name = "databricks-credentials"
-  }
-}
-
-# Store Databricks credentials in Secrets Manager
-resource "aws_secretsmanager_secret_version" "databricks_credentials" {
-  secret_id = aws_secretsmanager_secret.databricks_credentials.id
-  secret_string = jsonencode({
-    host  = var.databricks_host
-    token = var.databricks_token
-  })
-}
-
 # Create S3 bucket for logs and data
 resource "aws_s3_bucket" "airflow_logs" {
   bucket = "airflow-logs-${data.aws_caller_identity.current.account_id}-${var.aws_region}"

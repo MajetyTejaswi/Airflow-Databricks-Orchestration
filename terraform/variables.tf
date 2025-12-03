@@ -38,15 +38,3 @@ variable "public_key_path" {
   description = "Path to the public SSH key"
   type        = string
 }
-
-variable "databricks_host" {
-  description = "Databricks workspace URL"
-  type        = string
-  sensitive   = true
-}
-
-variable "databricks_token" {
-  description = "Databricks personal access token"
-  type        = string
-  sensitive   = true
-}
