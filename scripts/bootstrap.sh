@@ -1,11 +1,21 @@
 #!/bin/bash
 set -e
 
+# Redirect output to log file
+exec > >(tee -a /var/log/airflow-bootstrap.log)
+exec 2>&1
+
+echo "==================================="
+echo "Starting Airflow Bootstrap: $(date)"
+echo "==================================="
+
 # Update system packages
+echo "Updating system packages..."
 apt-get update
 apt-get upgrade -y
 
 # Install required packages
+echo "Installing required packages..."
 apt-get install -y \
     python3-pip \
     python3-venv \
@@ -17,33 +27,51 @@ apt-get install -y \
     libssl-dev \
     libffi-dev
 
+echo "✓ Packages installed"
+
 # Create airflow user
+echo "Creating airflow user..."
 useradd -m -s /bin/bash airflow || true
+echo "✓ Airflow user created"
 
 # Create Airflow home directory
+echo "Setting up Airflow home directory..."
 export AIRFLOW_HOME=/home/airflow/airflow
 mkdir -p $AIRFLOW_HOME
 chown -R airflow:airflow $AIRFLOW_HOME
+echo "✓ Airflow home directory created"
 
 # Switch to airflow user for Python setup
+echo "Installing Airflow as airflow user..."
 sudo -u airflow bash << 'EOF'
 # Set Airflow environment variables
 export AIRFLOW_HOME=/home/airflow/airflow
 export PYTHONUNBUFFERED=1
+
+echo "Creating Python virtual environment..."
 
 # Create Python virtual environment
 python3 -m venv $AIRFLOW_HOME/venv
 source $AIRFLOW_HOME/venv/bin/activate
 
 # Upgrade pip
+echo "Upgrading pip..."
 pip install --upgrade pip setuptools wheel
+echo "✓ Pip upgraded"
 
 # Install Airflow with basic providers
+echo "Installing Apache Airflow (this may take 5-10 minutes)..."
 pip install apache-airflow==2.7.3
+echo "✓ Airflow installed"
+
+echo "Installing Airflow providers..."
 pip install apache-airflow-providers-http==4.4.2
+echo "✓ Providers installed"
 
 # Initialize Airflow database
+echo "Initializing Airflow database..."
 airflow db init
+echo "✓ Database initialized"
 
 # Create Airflow admin user (default credentials - CHANGE IN PRODUCTION)
 airflow users create \
@@ -188,13 +216,25 @@ WantedBy=multi-user.target
 SERVICE
 
 # Reload systemd and enable services
+echo "Configuring systemd services..."
 systemctl daemon-reload
 systemctl enable airflow-webserver
 systemctl enable airflow-scheduler
 
 # Start services
+echo "Starting Airflow services..."
 systemctl start airflow-webserver
 systemctl start airflow-scheduler
 
+# Wait a bit for services to start
+sleep 10
+
+# Verify services are running
+echo "Verifying services..."
+systemctl status airflow-webserver --no-pager || true
+systemctl status airflow-scheduler --no-pager || true
+
 # Log complete
-echo "Airflow bootstrap completed at $(date)" > /var/log/airflow-bootstrap.log
+echo "==================================="
+echo "Airflow bootstrap completed: $(date)"
+echo "==================================="

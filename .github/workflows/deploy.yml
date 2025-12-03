@@ -361,6 +361,7 @@ jobs:
           MAX_ATTEMPTS=30
           ATTEMPT=1
           
+          echo "Waiting for SSH to be available..."
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             if ssh -i ~/.ssh/airflow-key.pem -o ConnectTimeout=5 -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "echo 'SSH ready'" 2>/dev/null; then
               echo "✓ SSH is ready"
@@ -370,6 +371,42 @@ jobs:
             sleep 10
             ATTEMPT=$((ATTEMPT + 1))
           done
+
+      - name: Wait for Airflow Installation
+        run: |
+          MAX_ATTEMPTS=60
+          ATTEMPT=1
+          
+          echo "Waiting for Airflow bootstrap to complete..."
+          echo "This may take 5-10 minutes for initial setup..."
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            # Check if bootstrap is complete by looking for the completion log
+            BOOTSTRAP_DONE=$(ssh -i ~/.ssh/airflow-key.pem -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "test -f /var/log/airflow-bootstrap.log && echo 'yes' || echo 'no'" 2>/dev/null || echo "no")
+            
+            if [ "$BOOTSTRAP_DONE" = "yes" ]; then
+              echo "✓ Airflow installation complete!"
+              
+              # Verify Airflow is actually installed
+              AIRFLOW_VERSION=$(ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "sudo -u airflow /home/airflow/airflow/venv/bin/airflow version 2>/dev/null || echo 'not found'" 2>/dev/null || echo "not found")
+              echo "Airflow version: $AIRFLOW_VERSION"
+              
+              if [ "$AIRFLOW_VERSION" != "not found" ]; then
+                echo "✓ Airflow is operational"
+                break
+              fi
+            fi
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Bootstrap in progress..."
+            sleep 30
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+          
+          if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+            echo "⚠️ Warning: Bootstrap may still be in progress"
+            echo "Checking bootstrap logs..."
+            ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "sudo tail -50 /var/log/cloud-init-output.log" || true
+          fi
 
       - name: Deploy DAGs to EC2
         run: |
