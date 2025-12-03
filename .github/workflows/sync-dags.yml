@@ -105,7 +105,8 @@ jobs:
           EOF
 
       - name: Send success notification
-        if: success() && secrets.SLACK_WEBHOOK != ''
+        if: success()
+        continue-on-error: true
         uses: slackapi/slack-github-action@v1.24.0
         with:
           webhook-url: ${{ secrets.SLACK_WEBHOOK }}
@@ -124,7 +125,8 @@ jobs:
             }
 
       - name: Send failure notification
-        if: failure() && secrets.SLACK_WEBHOOK != ''
+        if: failure()
+        continue-on-error: true
         uses: slackapi/slack-github-action@v1.24.0
         with:
           webhook-url: ${{ secrets.SLACK_WEBHOOK }}
