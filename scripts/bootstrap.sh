@@ -38,11 +38,9 @@ source $AIRFLOW_HOME/venv/bin/activate
 # Upgrade pip
 pip install --upgrade pip setuptools wheel
 
-# Install Airflow with Databricks provider
+# Install Airflow with basic providers
 pip install apache-airflow==2.7.3
-pip install apache-airflow-providers-databricks==4.3.0
 pip install apache-airflow-providers-http==4.4.2
-pip install requests
 
 # Initialize Airflow database
 airflow db init
@@ -144,9 +142,6 @@ remote_logging = False
 
 [scheduler]
 catchup_by_default = False
-
-[databricks]
-# Databricks credentials will be loaded from AWS Secrets Manager via environment variables
 AIRFLOW_CFG
 
 EOF

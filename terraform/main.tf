@@ -4,6 +4,14 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.0"
+    }
   }
 }
 
@@ -13,7 +21,7 @@ provider "aws" {
   default_tags {
     tags = {
       Environment = var.environment
-      Project     = "airflow-databricks"
+      Project     = "airflow-orchestration"
       ManagedBy   = "terraform"
     }
   }
@@ -144,7 +152,7 @@ resource "aws_iam_role" "airflow_ec2_role" {
   }
 }
 
-# Create IAM Policy for Databricks and S3 access
+# Create IAM Policy for S3 and CloudWatch access
 resource "aws_iam_role_policy" "airflow_ec2_policy" {
   name = "airflow-ec2-policy"
   role = aws_iam_role.airflow_ec2_role.id
@@ -159,7 +167,10 @@ resource "aws_iam_role_policy" "airflow_ec2_policy" {
           "s3:PutObject",
           "s3:ListBucket"
         ]
-        Resource = "*"
+        Resource = [
+          aws_s3_bucket.airflow_logs.arn,
+          "${aws_s3_bucket.airflow_logs.arn}/*"
+        ]
       },
       {
         Effect = "Allow"
@@ -168,21 +179,7 @@ resource "aws_iam_role_policy" "airflow_ec2_policy" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:*:*:*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ec2:DescribeInstances"
-        ]
-        Resource = "*"
+        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/airflow/*"
       }
     ]
   })
@@ -242,14 +239,27 @@ resource "aws_instance" "airflow" {
   depends_on = [aws_internet_gateway.main]
 }
 
+# Generate SSH key pair
+resource "tls_private_key" "airflow_ssh" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
 # Create Key Pair for SSH access
 resource "aws_key_pair" "deployer" {
   key_name   = "airflow-deployer-key"
-  public_key = file(var.public_key_path)
+  public_key = tls_private_key.airflow_ssh.public_key_openssh
 
   tags = {
     Name = "airflow-key-pair"
   }
+}
+
+# Save private key locally
+resource "local_file" "private_key" {
+  content         = tls_private_key.airflow_ssh.private_key_pem
+  filename        = "${path.module}/airflow-key.pem"
+  file_permission = "0600"
 }
 
 # Create S3 bucket for logs and data
@@ -292,6 +302,24 @@ output "s3_bucket_name" {
 }
 
 output "ssh_command" {
-  value       = "ssh -i <path-to-key> ubuntu@${aws_instance.airflow.public_ip}"
+  value       = "ssh -i ${path.module}/airflow-key.pem ubuntu@${aws_instance.airflow.public_ip}"
   description = "SSH command to connect to the instance"
+}
+
+output "ec2_instance_id" {
+  value       = aws_instance.airflow.id
+  description = "EC2 Instance ID"
+}
+
+output "airflow_access_info" {
+  value       = <<-EOT
+    =====================================
+    Airflow Web UI: http://${aws_instance.airflow.public_ip}:8080
+    Username: admin
+    Password: admin123
+    
+    SSH Access: ssh -i terraform/airflow-key.pem ubuntu@${aws_instance.airflow.public_ip}
+    =====================================
+  EOT
+  description = "Airflow access information"
 }

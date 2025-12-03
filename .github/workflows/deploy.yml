@@ -165,8 +165,6 @@ jobs:
           EOF
 
       - name: Terraform Plan
-        env:
-          TF_VAR_public_key_path: ~/.ssh/airflow-key.pub
         run: |
           cd terraform
           terraform init -backend-config=backend-config.tfbackend
@@ -227,15 +225,11 @@ jobs:
           terraform init -backend-config=backend-config.tfbackend
 
       - name: Terraform Plan
-        env:
-          TF_VAR_public_key_path: ~/.ssh/airflow-key.pub
         run: |
           cd terraform
           terraform plan -out=tfplan -no-color
 
       - name: Terraform Apply
-        env:
-          TF_VAR_public_key_path: ~/.ssh/airflow-key.pub
         run: |
           cd terraform
           terraform apply tfplan -no-color
@@ -243,6 +237,30 @@ jobs:
           # Save outputs to artifacts
           terraform output -json > outputs.json
           cat outputs.json
+          
+          # Display Airflow access info
+          echo ""
+          echo "=========================================="
+          terraform output -raw airflow_access_info
+          echo "=========================================="
+
+      - name: Save SSH Private Key
+        run: |
+          cd terraform
+          # The private key is generated at terraform/airflow-key.pem
+          if [ -f airflow-key.pem ]; then
+            echo "✓ SSH private key generated successfully"
+            chmod 600 airflow-key.pem
+          else
+            echo "⚠ Warning: SSH private key not found"
+          fi
+
+      - name: Upload SSH Key
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-key
+          path: terraform/airflow-key.pem
+          retention-days: 1
 
       - name: Upload Terraform outputs
         uses: actions/upload-artifact@v4
@@ -389,6 +407,12 @@ jobs:
         with:
           name: terraform-outputs
 
+      - name: Download SSH Key
+        uses: actions/download-artifact@v4
+        with:
+          name: ssh-key
+          path: ~/.ssh/
+
       - name: Extract EC2 IP
         id: get-ec2-ip
         run: |
@@ -401,9 +425,7 @@ jobs:
 
       - name: Setup SSH
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/airflow-key
-          chmod 600 ~/.ssh/airflow-key
+          chmod 600 ~/.ssh/airflow-key.pem
           ssh-keyscan -H ${{ steps.get-ec2-ip.outputs.ec2_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Wait for EC2 SSH
@@ -412,7 +434,7 @@ jobs:
           ATTEMPT=1
           
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            if ssh -i ~/.ssh/airflow-key -o ConnectTimeout=5 -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "echo 'SSH ready'" 2>/dev/null; then
+            if ssh -i ~/.ssh/airflow-key.pem -o ConnectTimeout=5 -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "echo 'SSH ready'" 2>/dev/null; then
               echo "✓ SSH is ready"
               break
             fi
@@ -423,17 +445,17 @@ jobs:
 
       - name: Deploy DAGs to EC2
         run: |
-          scp -i ~/.ssh/airflow-key -o StrictHostKeyChecking=no -r airflow-dags/* ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }}:/home/airflow/airflow/dags/ 2>/dev/null || true
+          scp -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no -r airflow-dags/* ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }}:/home/airflow/airflow/dags/ 2>/dev/null || true
           echo "✓ DAGs deployed to EC2"
 
       - name: Deploy Notebooks to EC2
         run: |
-          scp -i ~/.ssh/airflow-key -o StrictHostKeyChecking=no -r databricks-notebooks/* ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }}:/tmp/databricks-notebooks/ 2>/dev/null || true
+          scp -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no -r databricks-notebooks/* ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }}:/tmp/databricks-notebooks/ 2>/dev/null || true
           echo "✓ Notebooks staged on EC2"
 
       - name: Restart Airflow services
         run: |
-          ssh -i ~/.ssh/airflow-key -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} << 'EOF'
+          ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} << 'EOF'
           echo "Restarting Airflow services..."
           sudo systemctl restart airflow-scheduler || echo "Scheduler restart attempted"
           sudo systemctl restart airflow-webserver || echo "Webserver restart attempted"
@@ -461,11 +483,15 @@ jobs:
         with:
           name: terraform-outputs
 
+      - name: Download SSH Key
+        uses: actions/download-artifact@v4
+        with:
+          name: ssh-key
+          path: ~/.ssh/
+
       - name: Setup SSH for Git sync
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/airflow-key
-          chmod 600 ~/.ssh/airflow-key
+          chmod 600 ~/.ssh/airflow-key.pem
 
       - name: Trigger Git sync on EC2
         run: |
@@ -480,7 +506,7 @@ jobs:
           fi
           
           echo "Syncing DAGs from Git on EC2..."
-          ssh -i ~/.ssh/airflow-key -o StrictHostKeyChecking=no ubuntu@$EC2_IP << 'EOF'
+          ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP << 'EOF'
           cd /home/airflow/airflow/dags 2>/dev/null || true
           if [ -d ".git" ]; then
             git pull origin main
@@ -504,11 +530,15 @@ jobs:
         with:
           name: terraform-outputs
 
+      - name: Download SSH Key
+        uses: actions/download-artifact@v4
+        with:
+          name: ssh-key
+          path: ~/.ssh/
+
       - name: Setup SSH
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/airflow-key
-          chmod 600 ~/.ssh/airflow-key
+          chmod 600 ~/.ssh/airflow-key.pem
 
       - name: Validate DAGs on EC2
         run: |
@@ -523,7 +553,7 @@ jobs:
           fi
           
           echo "Validating DAGs on EC2: $EC2_IP"
-          ssh -i ~/.ssh/airflow-key -o StrictHostKeyChecking=no ubuntu@$EC2_IP << 'EOF'
+          ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP << 'EOF'
           export AIRFLOW_HOME=/home/airflow/airflow
           source $AIRFLOW_HOME/venv/bin/activate 2>/dev/null || true
           

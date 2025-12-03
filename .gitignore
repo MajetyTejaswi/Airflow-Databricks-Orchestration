@@ -34,6 +34,7 @@ env/
 ssh-keys/
 *.pem
 *.pub
+airflow-key*
 
 # AWS
 .aws/

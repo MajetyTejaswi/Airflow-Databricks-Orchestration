@@ -33,8 +33,3 @@ variable "root_volume_size" {
   type        = number
   default     = 30
 }
-
-variable "public_key_path" {
-  description = "Path to the public SSH key"
-  type        = string
-}

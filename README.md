@@ -1,162 +1,120 @@
-# Airflow-Databricks Orchestration Pipeline
+# Airflow Orchestration Pipeline
 
-Complete end-to-end data pipeline using EC2, Apache Airflow, Databricks, and Terraform for Infrastructure as Code.
+Complete end-to-end data pipeline using EC2 and Apache Airflow with Terraform for Infrastructure as Code.
 
-## 📋 Quick Navigation
+## 📋 Overview
 
-- **Just want to get started?** → [Quick Start (5 min)](#quick-start)
-- **Ready to deploy?** → [Deployment Guide](#deployment-guide)
-- **Want the details?** → [Complete Setup Instructions](#complete-setup-instructions)
-- **Need to troubleshoot?** → [Troubleshooting](#troubleshooting)
-- **Want to customize?** → [Advanced Configuration](#advanced-configuration)
+This project deploys a fully automated Airflow environment on AWS EC2 using GitHub Actions for CI/CD. The infrastructure is managed by Terraform and automatically provisions all necessary AWS resources.
 
----
+## Prerequisites
 
-## Quick Start
+- AWS Account with appropriate permissions
+- GitHub repository with Actions enabled
+- No local Terraform installation required (runs in GitHub Actions)
 
-### Prerequisites
+## Deployment via GitHub Actions
 
-- AWS Account with credentials stored securely (do NOT commit credentials)
-- Databricks Account with workspace URL
-- Terraform v1.0+ installed
-- SSH key pair
+### Step 1: Configure GitHub Secrets
 
-### 5-Step Deployment
-
-1. **Configure AWS**
-   ```bash
-   aws configure
-   # AWS Access Key ID: [your-key]
-   # AWS Secret Access Key: [your-secret]
-   # Default region: us-east-1
-   ```
-
-2. **Generate SSH Key**
-   ```bash
-   ssh-keygen -t rsa -b 4096 -f ~/.ssh/airflow-key -N ""
-   ```
-
-3. **Update Configuration**
-   ```bash
-   nano terraform/terraform.tfvars
-   # Update:
-   # - databricks_host: [your-databricks-workspace-url]
-   # - databricks_token: [your-databricks-token]
-   # - public_key_path: ~/.ssh/airflow-key.pub
-   ```
-
-4. **Deploy Infrastructure**
-   ```bash
-   cd terraform
-   terraform init
-   terraform plan
-   terraform apply
-   ```
-
-5. **Access Airflow**
-   ```
-   http://<EC2_PUBLIC_IP>:8080
-   Username: admin
-   Password: admin123
-   ```
-
----
-
-## Architecture Overview
+Add these secrets to your GitHub repository (Settings → Secrets and variables → Actions):
 
 ```
-GitHub (DAGs) 
-    ↓
-EC2 (Airflow Scheduler & Webserver)
-    ↓
-Databricks (Jobs/Notebooks)
-    ↓
-Data Processing Results
+AWS_ACCESS_KEY_ID=your_aws_access_key
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key
 ```
+
+### Step 2: Push to Main Branch
+
+The deployment workflow automatically triggers when you push to the `main` branch:
+
+```bash
+git add .
+git commit -m "Deploy Airflow infrastructure"
+git push origin main
+```
+
+### Step 3: Monitor Deployment
+
+1. Go to GitHub Actions tab in your repository
+2. Watch the `Deploy Airflow Infrastructure & DAGs` workflow
+3. Once complete, check the workflow output for the Airflow Web UI URL
 
 ### What Gets Deployed
 
-✅ **EC2 Instance** - Runs Airflow (t3.medium, Ubuntu 22.04)  
-✅ **VPC** - Isolated network (10.0.0.0/16)  
-✅ **Security Groups** - Controlled access (SSH, HTTP, 8080)  
-✅ **IAM Roles** - Least privilege permissions  
-✅ **S3 Bucket** - Logs and data storage  
-✅ **Secrets Manager** - Encrypted credentials  
+- VPC with public subnet and internet gateway
+- EC2 instance (t3.medium) with Airflow installed
+- S3 bucket for logs
+- IAM roles and security groups
+- Airflow webserver on port 8080
+- Airflow scheduler running as systemd service
 
----
+## Accessing Airflow
+
+After deployment completes, check the GitHub Actions output for:
+
+```
+Airflow Web UI: http://<EC2_PUBLIC_IP>:8080
+Username: admin
+Password: admin123
+```
+
+## Architecture
+
+```
+GitHub Actions (CI/CD)
+    ↓
+Terraform (Infrastructure)
+    ↓
+AWS EC2 (Airflow)
+    ↓
+DAGs Execution
+```
 
 ## Project Structure
 
 ```
 .
+├── .github/workflows/
+│   ├── deploy.yml           # Main deployment workflow
+│   └── sync-dags.yml        # DAG sync workflow
 ├── terraform/
 │   ├── main.tf              # AWS infrastructure
 │   ├── variables.tf         # Variable definitions
-│   └── terraform.tfvars     # Your configuration (UPDATE THIS)
+│   └── terraform.tfvars     # Configuration values
 ├── scripts/
-│   ├── bootstrap.sh         # EC2 initialization (auto-runs)
-│   ├── setup.sh             # Setup wizard
-│   ├── post-deploy.sh       # Post-deployment config
-│   ├── destroy.sh           # Cleanup script
-│   └── validate.py          # Pre-deployment validation
-├── airflow-dags/
-│   ├── databricks_etl_pipeline.py    # Sample DAG 1
-│   └── databricks_job_trigger.py     # Sample DAG 2
-├── databricks-notebooks/
-│   └── sample_etl_notebook.py        # Sample notebook
-├── requirements.txt
-├── Makefile
-└── README.md (this file)
+│   ├── bootstrap.sh         # EC2 initialization
+│   └── setup-terraform-backend.sh
+├── airflow-dags/            # Your Airflow DAGs
+└── databricks-notebooks/    # Optional notebooks
 ```
 
----
+## Configuration
 
-## Deployment Guide
+The Terraform configuration uses the following defaults:
+- **Region**: us-east-1
+- **Instance Type**: t3.medium
+- **VPC CIDR**: 10.0.0.0/16
+- **Airflow Version**: 2.7.3
 
-### Phase 1: Preparation (15 minutes)
+Modify `terraform/terraform.tfvars` to customize these values.
 
-#### Gather Information
+## SSH Access
 
-You'll need:
+After deployment, the private SSH key is automatically generated and stored as a GitHub Actions artifact. To access the EC2 instance:
 
-1. **AWS Account Details** ✅
-   - Access Key: `[your-key]`
-   - Secret: `[your-secret]`
-   - Region: `us-east-1`
+1. Download the `ssh-key` artifact from the GitHub Actions run
+2. Use the command shown in the workflow output:
+   ```bash
+   ssh -i airflow-key.pem ubuntu@<EC2_IP>
+   ```
 
-2. **Databricks Details** ✅
-   - Workspace URL: `[your-workspace-url]`
-   - Token: `[your-databricks-token]`
+## Customizing DAGs
 
-3. **Local Requirements**
-   - Terraform 1.0+ installed
-   - AWS CLI installed
-   - SSH client
-   - Git (optional)
+Add your DAGs to the `airflow-dags/` directory. They will automatically be deployed when you push to the main branch.
 
-#### Verify AWS Credentials
+## Cleanup
 
-```bash
-aws configure
-# Enter credentials when prompted
-
-# Test connection
-aws sts get-caller-identity
-# Should return your account info
-```
-
-#### Generate SSH Key
-
-```bash
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/airflow-key -N ""
-
-# Verify
-ls -la ~/.ssh/airflow-key*
-```
-
----
-
-### Phase 2: Configuration (10 minutes)
+To destroy the infrastructure, run the destroy script or manually delete resources via AWS Console.
 
 #### Update Terraform Variables
 
