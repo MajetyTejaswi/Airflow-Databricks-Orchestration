@@ -31,21 +31,104 @@ Use GitHub Actions for production changes and Git Sync or SCP for quick DAG-only
 
 ## Quick Setup
 
-1. Add required GitHub Secrets (do NOT store secrets in repo files):
-   - `AWS_ACCESS_KEY_ID`
-   - `AWS_SECRET_ACCESS_KEY`
-   - `EC2_SSH_PRIVATE_KEY` (contents of your private key; include BEGIN/END lines)
-   - `SLACK_WEBHOOK` (optional)
+1. **Create AWS IAM User & Access Keys:**
+   ```bash
+   chmod +x scripts/setup-terraform-iam.sh
+   scripts/setup-terraform-iam.sh
+   ```
 
-2. Ensure `.env` is NOT committed. If you use a local `.env` for convenience, keep it in `.gitignore`.
+2. **Add GitHub Secrets** (Go to repo Settings → Secrets → Actions):
+   - `AWS_ACCESS_KEY_ID` — from IAM user
+   - `AWS_SECRET_ACCESS_KEY` — from IAM user
+   - `EC2_SSH_PRIVATE_KEY` — (contents of your private key; include BEGIN/END lines)
+   - `SLACK_WEBHOOK` — (optional, for notifications)
 
-3. Generate or reuse an SSH key for EC2 access and add the private key to GitHub Secrets (name it `EC2_SSH_PRIVATE_KEY`). Example local generation:
+3. **Generate SSH Key for EC2:**
+   ```bash
+   ssh-keygen -t rsa -b 4096 -f ~/.ssh/airflow-key -N "" -C "airflow-deployment-key"
+   ```
+   Add public key path to `terraform/terraform.tfvars`
+
+4. **Set up Terraform Backend:**
+   ```bash
+   chmod +x scripts/setup-terraform-backend.sh
+   AWS_REGION=us-east-1 scripts/setup-terraform-backend.sh
+   ```
+
+5. **Verify AWS Credentials:**
+   ```bash
+   export AWS_ACCESS_KEY_ID=your_key_id
+   export AWS_SECRET_ACCESS_KEY=your_secret
+   aws s3 ls
+   aws dynamodb list-tables --region us-east-1
+   ```
+
+## GitHub Actions IAM Setup
+
+### Automated IAM User Creation
 
 ```bash
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/airflow-key -N "" -C "airflow-deployment-key"
+chmod +x scripts/setup-terraform-iam.sh
+scripts/setup-terraform-iam.sh
 ```
 
-4. Confirm Terraform is configured and your AWS account has necessary permissions.
+**Output includes:**
+- IAM user: `airflow-terraform-ci`
+- Access Key ID and Secret (save these!)
+- Policy: terraform-policy
+
+### Manual IAM Setup
+
+```bash
+# Create user
+aws iam create-user --user-name airflow-terraform-ci
+
+# Create access keys
+aws iam create-access-key --user-name airflow-terraform-ci
+
+# Attach policy
+aws iam put-user-policy --user-name airflow-terraform-ci \
+  --policy-name terraform-policy \
+  --policy-document file://terraform-policy.json
+```
+
+### IAM Permissions Required
+
+Minimum permissions needed:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TerraformStateS3",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketVersioning"],
+      "Resource": "arn:aws:s3:::airflow-terraform-state-*"
+    },
+    {
+      "Sid": "TerraformStateS3Objects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::airflow-terraform-state-*/airflow/*"
+    },
+    {
+      "Sid": "TerraformStateLocking",
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:GetItem"],
+      "Resource": "arn:aws:dynamodb:*:*:table/airflow-terraform-locks"
+    },
+    {
+      "Sid": "TerraformAWSResources",
+      "Effect": "Allow",
+      "Action": ["ec2:*", "iam:*", "s3:*", "rds:*", "ecs:*", "secretsmanager:*"],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+## Quick Setup
 
 ## Deployment Methods
 

@@ -98,11 +98,45 @@ jobs:
                   sys.exit(1)
           EOF
 
+  # Job 3.5: Setup Terraform Backend
+  setup-terraform-backend:
+    needs: [validate-terraform]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      bucket_name: ${{ steps.backend-setup.outputs.bucket_name }}
+      dynamodb_table: ${{ steps.backend-setup.outputs.dynamodb_table }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform Backend Infrastructure
+        id: backend-setup
+        run: |
+          chmod +x scripts/setup-terraform-backend.sh
+          scripts/setup-terraform-backend.sh
+          
+          # Export outputs
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="airflow-terraform-state-${AWS_ACCOUNT_ID}"
+          DYNAMODB_TABLE="airflow-terraform-locks"
+          
+          echo "bucket_name=$BUCKET_NAME" >> $GITHUB_OUTPUT
+          echo "dynamodb_table=$DYNAMODB_TABLE" >> $GITHUB_OUTPUT
+          echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_OUTPUT
+
   # Job 3: Plan Terraform
   plan-terraform:
-    needs: validate-terraform
+    needs: [setup-terraform-backend]
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/develop'
+    if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/develop' && github.event_name == 'push')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -119,10 +153,21 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Create Terraform Backend Config
+        run: |
+          cd terraform
+          cat > backend-config.tfbackend << EOF
+          bucket         = "${{ needs.setup-terraform-backend.outputs.bucket_name }}"
+          key            = "airflow/terraform.tfstate"
+          region         = "${{ env.AWS_REGION }}"
+          encrypt        = true
+          dynamodb_table = "${{ needs.setup-terraform-backend.outputs.dynamodb_table }}"
+          EOF
+
       - name: Terraform Plan
         run: |
           cd terraform
-          terraform init
+          terraform init -backend-config=backend-config.tfbackend
           terraform plan -out=tfplan -no-color
           
       - name: Comment PR with plan
@@ -143,7 +188,7 @@ jobs:
 
   # Job 4: Deploy Infrastructure (only on main branch)
   deploy-infrastructure:
-    needs: [validate-terraform, validate-dags]
+    needs: [validate-terraform, validate-dags, setup-terraform-backend]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
@@ -162,10 +207,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Create Terraform Backend Config
+        run: |
+          cd terraform
+          cat > backend-config.tfbackend << EOF
+          bucket         = "${{ needs.setup-terraform-backend.outputs.bucket_name }}"
+          key            = "airflow/terraform.tfstate"
+          region         = "${{ env.AWS_REGION }}"
+          encrypt        = true
+          dynamodb_table = "${{ needs.setup-terraform-backend.outputs.dynamodb_table }}"
+          EOF
+          cat backend-config.tfbackend
+
       - name: Terraform Init
         run: |
           cd terraform
-          terraform init
+          terraform init -backend-config=backend-config.tfbackend
 
       - name: Terraform Plan
         run: |
@@ -382,17 +439,6 @@ jobs:
           sudo systemctl status airflow-webserver --no-pager || true
           
           echo "✓ Airflow services updated"
-          EOF
-          sudo systemctl restart airflow-webserver
-          
-          # Wait for services to start
-          sleep 10
-          
-          # Verify services
-          sudo systemctl status airflow-scheduler --no-pager
-          sudo systemctl status airflow-webserver --no-pager
-          
-          echo "✓ Airflow services restarted"
           EOF
 
   # Job 6: Sync DAGs via Git (Alternative method)
