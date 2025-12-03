@@ -3,15 +3,22 @@
 # Content-Type: text/x-shellscript; charset="us-ascii"
 set -ex
 
-# Wait for cloud-init to complete
-while [ ! -f /var/lib/cloud/instance/boot-finished ]; do
-    echo "Waiting for cloud-init to complete..."
+# Redirect output to log file first
+exec > >(tee -a /var/log/airflow-bootstrap.log) 2>&1
+
+# Wait for network to be available (not for cloud-init to finish - that causes deadlock)
+echo "Waiting for network..."
+while ! ping -c 1 -W 1 8.8.8.8 &> /dev/null; do
+    echo "Waiting for network connectivity..."
+    sleep 2
+done
+echo "Network is available"
+
+# Wait for apt locks to be released
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    echo "Waiting for apt lock to be released..."
     sleep 5
 done
-
-# Redirect output to log file
-exec > >(tee -a /var/log/airflow-bootstrap.log)
-exec 2>&1
 
 echo "==================================="
 echo "Starting Airflow Bootstrap: $(date)"

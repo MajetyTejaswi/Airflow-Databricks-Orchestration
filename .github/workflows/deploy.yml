@@ -334,43 +334,72 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-outputs
+          path: ./terraform-outputs/
 
       - name: Download SSH Key
         uses: actions/download-artifact@v4
         with:
           name: ssh-key
-          path: ~/.ssh/
+          path: ./ssh-key/
 
       - name: Extract EC2 IP
         id: get-ec2-ip
         run: |
-          EC2_IP=$(cat outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4 || echo "")
+          EC2_IP=$(cat terraform-outputs/outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "")
           if [ -z "$EC2_IP" ]; then
-            EC2_IP=$(cat outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "")
+            EC2_IP=$(cat terraform-outputs/outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4 || echo "")
           fi
           echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
           echo "EC2 IP: $EC2_IP"
 
       - name: Setup SSH
         run: |
+          mkdir -p ~/.ssh
+          cp ./ssh-key/airflow-key.pem ~/.ssh/airflow-key.pem
           chmod 600 ~/.ssh/airflow-key.pem
+          
+          # Debug: Check key file
+          echo "SSH Key file info:"
+          ls -la ~/.ssh/airflow-key.pem
+          head -1 ~/.ssh/airflow-key.pem
+          
+          # Add to known hosts
           ssh-keyscan -H ${{ steps.get-ec2-ip.outputs.ec2_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Wait for EC2 SSH
         run: |
           MAX_ATTEMPTS=30
           ATTEMPT=1
+          EC2_IP="${{ steps.get-ec2-ip.outputs.ec2_ip }}"
           
-          echo "Waiting for SSH to be available..."
+          echo "Waiting for SSH to be available on $EC2_IP..."
+          echo "Debug: Testing network connectivity..."
+          
+          # First test if the host is reachable
+          ping -c 1 $EC2_IP || echo "Ping failed (might be blocked by security group)"
+          
+          # Test if port 22 is open
+          nc -zv -w 5 $EC2_IP 22 2>&1 || echo "Port 22 check failed"
+          
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            if ssh -i ~/.ssh/airflow-key.pem -o ConnectTimeout=5 -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "echo 'SSH ready'" 2>/dev/null; then
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Trying SSH..."
+            if ssh -i ~/.ssh/airflow-key.pem -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes -v ubuntu@$EC2_IP "echo 'SSH ready'" 2>&1; then
               echo "✓ SSH is ready"
               break
             fi
-            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Waiting for SSH..."
+            echo "SSH not ready yet, waiting..."
             sleep 10
             ATTEMPT=$((ATTEMPT + 1))
           done
+          
+          if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+            echo "❌ SSH connection failed after $MAX_ATTEMPTS attempts"
+            echo "Possible causes:"
+            echo "  1. Security group not allowing SSH from GitHub Actions IPs"
+            echo "  2. EC2 instance not fully booted"
+            echo "  3. SSH key mismatch"
+            exit 1
+          fi
 
       - name: Wait for Airflow Installation
         run: |
@@ -447,22 +476,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-outputs
+          path: ./terraform-outputs/
 
       - name: Download SSH Key
         uses: actions/download-artifact@v4
         with:
           name: ssh-key
-          path: ~/.ssh/
+          path: ./ssh-key/
 
       - name: Setup SSH for Git sync
         run: |
+          mkdir -p ~/.ssh
+          cp ./ssh-key/airflow-key.pem ~/.ssh/airflow-key.pem
           chmod 600 ~/.ssh/airflow-key.pem
 
       - name: Trigger Git sync on EC2
         run: |
-          EC2_IP=$(cat outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "")
+          EC2_IP=$(cat terraform-outputs/outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "")
           if [ -z "$EC2_IP" ]; then
-            EC2_IP=$(cat outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4 || echo "")
+            EC2_IP=$(cat terraform-outputs/outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4 || echo "")
           fi
           
           if [ -z "$EC2_IP" ]; then
@@ -494,22 +526,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-outputs
+          path: ./terraform-outputs/
 
       - name: Download SSH Key
         uses: actions/download-artifact@v4
         with:
           name: ssh-key
-          path: ~/.ssh/
+          path: ./ssh-key/
 
       - name: Setup SSH
         run: |
+          mkdir -p ~/.ssh
+          cp ./ssh-key/airflow-key.pem ~/.ssh/airflow-key.pem
           chmod 600 ~/.ssh/airflow-key.pem
 
       - name: Validate DAGs on EC2
         run: |
-          EC2_IP=$(cat outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "")
+          EC2_IP=$(cat terraform-outputs/outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "")
           if [ -z "$EC2_IP" ]; then
-            EC2_IP=$(cat outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4 || echo "")
+            EC2_IP=$(cat terraform-outputs/outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4 || echo "")
           fi
           
           if [ -z "$EC2_IP" ]; then

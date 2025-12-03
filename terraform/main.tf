@@ -221,8 +221,11 @@ resource "aws_instance" "airflow" {
   iam_instance_profile   = aws_iam_instance_profile.airflow_profile.name
   key_name               = aws_key_pair.deployer.key_name
 
-  # Add bootstrap script
-  user_data = file("${path.module}/../scripts/bootstrap.sh")
+  # Add bootstrap script with base64 encoding for reliability
+  user_data_base64 = base64encode(file("${path.module}/../scripts/bootstrap.sh"))
+  
+  # Don't replace instance on user_data changes (set to true if you want to force recreation)
+  # user_data_replace_on_change = true
 
   root_block_device {
     volume_type           = "gp3"
