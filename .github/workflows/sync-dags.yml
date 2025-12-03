@@ -7,9 +7,9 @@ on:
       - develop
     paths:
       - 'airflow-dags/**'
-  schedule:
-    # Auto-sync every 30 minutes during business hours
-    - cron: '*/30 8-18 * * MON-FRI'
+  # Uncomment below to enable scheduled sync (runs every 30 min during business hours)
+  # schedule:
+  #   - cron: '*/30 8-18 * * MON-FRI'
   workflow_dispatch:
 
 jobs:
