@@ -100,7 +100,7 @@ jobs:
   setup-terraform-backend:
     needs: [validate-terraform]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     outputs:
       bucket_name: ${{ steps.backend-setup.outputs.bucket_name }}
       dynamodb_table: ${{ steps.backend-setup.outputs.dynamodb_table }}
@@ -188,7 +188,7 @@ jobs:
   deploy-infrastructure:
     needs: [validate-terraform, validate-dags, setup-terraform-backend]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -278,7 +278,7 @@ jobs:
   wait-for-ec2:
     needs: [deploy-infrastructure]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -325,7 +325,7 @@ jobs:
   deploy-dags:
     needs: [validate-dags, wait-for-ec2]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -438,7 +438,7 @@ jobs:
   sync-dags-git:
     needs: [validate-dags, wait-for-ec2]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -485,7 +485,7 @@ jobs:
   validate-deployment:
     needs: [deploy-dags]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
