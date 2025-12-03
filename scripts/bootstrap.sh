@@ -201,5 +201,5 @@ systemctl enable airflow-scheduler
 systemctl start airflow-webserver
 systemctl start airflow-scheduler
 
-# Log completion
+# Log complete
 echo "Airflow bootstrap completed at $(date)" > /var/log/airflow-bootstrap.log
