@@ -72,7 +72,7 @@ jobs:
 
       - name: Check DAG structure
         run: |
-          python3 -c "
+          cat > /tmp/validate_dags.py << 'SCRIPT'
           import ast
           import os
           import sys
@@ -97,9 +97,8 @@ jobs:
                       print(f'  ✗ {dag_file} syntax error: {e}')
                       sys.exit(1)
           print('✓ All DAGs validated!')
-          "
-                  sys.exit(1)
-          EOF
+          SCRIPT
+          python3 /tmp/validate_dags.py
 
   # Job 3.5: Setup Terraform Backend
   setup-terraform-backend:
