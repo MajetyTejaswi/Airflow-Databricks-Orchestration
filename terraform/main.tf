@@ -353,3 +353,9 @@ output "airflow_access_info" {
   EOT
   description = "Airflow access information"
 }
+
+output "ssh_private_key" {
+  value       = tls_private_key.airflow_ssh.private_key_pem
+  description = "Private SSH key for EC2 access"
+  sensitive   = true
+}

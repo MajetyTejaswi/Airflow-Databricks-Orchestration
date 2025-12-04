@@ -249,12 +249,17 @@ jobs:
       - name: Save SSH Private Key
         run: |
           cd terraform
-          # The private key is generated at terraform/airflow-key.pem
-          if [ -f airflow-key.pem ]; then
+          # Extract SSH key from Terraform output (sensitive output)
+          terraform output -raw ssh_private_key > airflow-key.pem
+          chmod 600 airflow-key.pem
+          
+          # Verify key was created
+          if [ -f airflow-key.pem ] && [ -s airflow-key.pem ]; then
             echo "✓ SSH private key generated successfully"
-            chmod 600 airflow-key.pem
+            head -1 airflow-key.pem
           else
-            echo "⚠ Warning: SSH private key not found"
+            echo "❌ SSH private key not found or empty"
+            exit 1
           fi
 
       - name: Upload SSH Key
@@ -349,15 +354,39 @@ jobs:
       - name: Extract EC2 IP
         id: get-ec2-ip
         run: |
-          EC2_IP=$(cat terraform-outputs/outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "")
+          echo "=== Debug: Listing downloaded files ==="
+          ls -la terraform-outputs/
+          echo "=== Debug: outputs.json content ==="
+          cat terraform-outputs/outputs.json
+          echo ""
+          echo "=== Extracting EC2 IP ==="
+          
+          # Try jq first
+          EC2_IP=$(jq -r '.ec2_public_ip.value // empty' terraform-outputs/outputs.json 2>/dev/null || echo "")
+          
+          # Fallback to grep if jq fails
           if [ -z "$EC2_IP" ]; then
-            EC2_IP=$(cat terraform-outputs/outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4 || echo "")
+            echo "jq extraction failed, trying grep..."
+            EC2_IP=$(grep -o '"ec2_public_ip"[^}]*' terraform-outputs/outputs.json | grep -o '"value"[^,}]*' | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+' || echo "")
           fi
+          
+          if [ -z "$EC2_IP" ]; then
+            echo "❌ Failed to extract EC2 IP from outputs.json"
+            exit 1
+          fi
+          
           echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
-          echo "EC2 IP: $EC2_IP"
+          echo "✓ EC2 IP: $EC2_IP"
 
       - name: Setup SSH
         run: |
+          EC2_IP="${{ steps.get-ec2-ip.outputs.ec2_ip }}"
+          
+          if [ -z "$EC2_IP" ]; then
+            echo "❌ EC2 IP is empty!"
+            exit 1
+          fi
+          
           mkdir -p ~/.ssh
           cp ./ssh-key/airflow-key.pem ~/.ssh/airflow-key.pem
           chmod 600 ~/.ssh/airflow-key.pem
@@ -368,13 +397,18 @@ jobs:
           head -1 ~/.ssh/airflow-key.pem
           
           # Add to known hosts
-          ssh-keyscan -H ${{ steps.get-ec2-ip.outputs.ec2_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H $EC2_IP >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Wait for EC2 SSH
         run: |
           MAX_ATTEMPTS=30
           ATTEMPT=1
           EC2_IP="${{ steps.get-ec2-ip.outputs.ec2_ip }}"
+          
+          if [ -z "$EC2_IP" ]; then
+            echo "❌ EC2 IP is empty!"
+            exit 1
+          fi
           
           echo "Waiting for SSH to be available on $EC2_IP..."
           echo "Debug: Testing network connectivity..."
