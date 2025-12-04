@@ -240,8 +240,9 @@ User=airflow
 Group=airflow
 WorkingDirectory=/home/airflow/airflow
 Environment="AIRFLOW_HOME=/home/airflow/airflow"
+Environment="PATH=/home/airflow/airflow/venv/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/home/airflow/airflow/venv/bin/airflow webserver --port 8080
-Restart=on-failure
+Restart=always
 RestartSec=10
 
 [Install]
@@ -260,8 +261,9 @@ User=airflow
 Group=airflow
 WorkingDirectory=/home/airflow/airflow
 Environment="AIRFLOW_HOME=/home/airflow/airflow"
+Environment="PATH=/home/airflow/airflow/venv/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/home/airflow/airflow/venv/bin/airflow scheduler
-Restart=on-failure
+Restart=always
 RestartSec=10
 
 [Install]
