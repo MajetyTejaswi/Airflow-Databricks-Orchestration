@@ -1,145 +1,50 @@
-name: Sync DAGs from GitHub
+name: Sync DAGs to S3
 
 on:
   push:
     branches:
       - main
-      - develop
     paths:
       - 'airflow-dags/**'
-  # Uncomment below to enable scheduled sync (runs every 30 min during business hours)
-  # schedule:
-  #   - cron: '*/30 8-18 * * MON-FRI'
   workflow_dispatch:
 
+env:
+  AWS_REGION: us-east-1
+
 jobs:
-  sync-dags:
+  sync-dags-to-s3:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/airflow-key
-          chmod 600 ~/.ssh/airflow-key
-          ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Get EC2 IP from Terraform state
-        id: get-ec2
-        run: |
-          # Try to get EC2 IP from terraform state
-          cd terraform
-          terraform init -backend-config="key=terraform.tfstate" 2>/dev/null || true
-          
-          EC2_IP=$(terraform output -raw ec2_public_ip 2>/dev/null || echo "")
-          
-          if [ -z "$EC2_IP" ]; then
-            echo "EC2_IP not available - using environment variable"
-            EC2_IP="${{ secrets.EC2_IP }}"
-          fi
-          
-          echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
-
-      - name: Sync DAGs via Git pull on EC2
-        if: steps.get-ec2.outputs.ec2_ip != ''
-        run: |
-          ssh -i ~/.ssh/airflow-key -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2.outputs.ec2_ip }} << 'EOF'
-          set -e
-          
-          echo "📦 Starting DAG sync..."
-          
-          cd /home/airflow/airflow/dags
-          
-          # Check if it's a git repository
-          if [ ! -d .git ]; then
-            echo "Initializing git repository..."
-            git init
-            git remote add origin https://github.com/${{ github.repository }}.git
-          fi
-          
-          # Pull latest DAGs
-          echo "Pulling latest DAGs from GitHub..."
-          git fetch origin main
-          git checkout -f origin/main -- airflow-dags/ || git pull origin main
-          
-          echo "✓ DAGs synced successfully"
-          
-          # List synced DAGs
-          ls -la /home/airflow/airflow/dags/
-          EOF
-
-      - name: Validate synced DAGs
-        if: steps.get-ec2.outputs.ec2_ip != ''
-        run: |
-          ssh -i ~/.ssh/airflow-key -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2.outputs.ec2_ip }} << 'EOF'
-          export AIRFLOW_HOME=/home/airflow/airflow
-          source $AIRFLOW_HOME/venv/bin/activate
-          
-          echo "Validating DAGs..."
-          airflow dags validate 2>/dev/null || echo "Airflow validation skipped"
-          
-          echo "DAGs list:"
-          airflow dags list 2>/dev/null || echo "Could not list DAGs"
-          EOF
-
-      - name: Reload Airflow scheduler
-        if: steps.get-ec2.outputs.ec2_ip != ''
-        run: |
-          ssh -i ~/.ssh/airflow-key -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2.outputs.ec2_ip }} << 'EOF'
-          echo "Reloading Airflow scheduler..."
-          
-          # Graceful restart
-          sudo systemctl reload airflow-scheduler 2>/dev/null || sudo systemctl restart airflow-scheduler
-          
-          sleep 5
-          
-          # Verify services
-          if sudo systemctl is-active --quiet airflow-scheduler; then
-            echo "✓ Airflow scheduler is running"
-          else
-            echo "⚠️ Airflow scheduler may not be running"
-            sudo systemctl status airflow-scheduler --no-pager || true
-          fi
-          EOF
-
-      - name: Send success notification
-        if: success()
-        continue-on-error: true
-        uses: slackapi/slack-github-action@v1.24.0
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
-          payload: |
-            {
-              "text": "✅ DAGs Synced Successfully",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*DAGs Synced* ✓\n*Repository*: ${{ github.repository }}\n*Branch*: ${{ github.ref }}\n*Commit*: ${{ github.sha }}"
-                  }
-                }
-              ]
-            }
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Send failure notification
-        if: failure()
-        continue-on-error: true
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
-          payload: |
-            {
-              "text": "❌ DAG Sync Failed",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*DAG Sync Failed* 🚨\n*Repository*: ${{ github.repository }}\n*Branch*: ${{ github.ref }}"
-                  }
-                }
-              ]
-            }
+      - name: Get S3 bucket name
+        id: get-bucket
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          S3_BUCKET="airflow-dags-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+          echo "bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+          echo "S3 DAGs Bucket: $S3_BUCKET"
+
+      - name: Sync DAGs to S3
+        run: |
+          S3_BUCKET="${{ steps.get-bucket.outputs.bucket }}"
+          
+          echo "Syncing DAGs to s3://${S3_BUCKET}/dags/"
+          
+          aws s3 sync airflow-dags/ "s3://${S3_BUCKET}/dags/" \
+            --exclude "*" \
+            --include "*.py" \
+            --delete
+          
+          echo "✓ DAGs synced to S3"
+          
+          echo "Current DAGs in S3:"
+          aws s3 ls "s3://${S3_BUCKET}/dags/"

@@ -165,11 +165,14 @@ resource "aws_iam_role_policy" "airflow_ec2_policy" {
         Action = [
           "s3:GetObject",
           "s3:PutObject",
-          "s3:ListBucket"
+          "s3:ListBucket",
+          "s3:DeleteObject"
         ]
         Resource = [
           aws_s3_bucket.airflow_logs.arn,
-          "${aws_s3_bucket.airflow_logs.arn}/*"
+          "${aws_s3_bucket.airflow_logs.arn}/*",
+          aws_s3_bucket.airflow_dags.arn,
+          "${aws_s3_bucket.airflow_dags.arn}/*"
         ]
       },
       {
@@ -221,11 +224,11 @@ resource "aws_instance" "airflow" {
   iam_instance_profile   = aws_iam_instance_profile.airflow_profile.name
   key_name               = aws_key_pair.deployer.key_name
 
-  # Add bootstrap script with base64 encoding for reliability
-  user_data_base64 = base64encode(file("${path.module}/../scripts/bootstrap.sh"))
-  
-  # Don't replace instance on user_data changes (set to true if you want to force recreation)
-  # user_data_replace_on_change = true
+  # Use user_data directly - cloud-init handles bash scripts
+  user_data = file("${path.module}/../scripts/bootstrap.sh")
+
+  # Ensure user_data changes trigger instance replacement
+  user_data_replace_on_change = true
 
   root_block_device {
     volume_type           = "gp3"
@@ -274,9 +277,27 @@ resource "aws_s3_bucket" "airflow_logs" {
   }
 }
 
+# Create S3 bucket for DAGs
+resource "aws_s3_bucket" "airflow_dags" {
+  bucket = "airflow-dags-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
+
+  tags = {
+    Name = "airflow-dags-bucket"
+  }
+}
+
 # Enable versioning on S3 bucket
 resource "aws_s3_bucket_versioning" "airflow_logs" {
   bucket = aws_s3_bucket.airflow_logs.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Enable versioning on DAGs bucket
+resource "aws_s3_bucket_versioning" "airflow_dags" {
+  bucket = aws_s3_bucket.airflow_dags.id
 
   versioning_configuration {
     status = "Enabled"
@@ -304,6 +325,11 @@ output "s3_bucket_name" {
   description = "S3 bucket for Airflow logs"
 }
 
+output "s3_dags_bucket_name" {
+  value       = aws_s3_bucket.airflow_dags.id
+  description = "S3 bucket for Airflow DAGs"
+}
+
 output "ssh_command" {
   value       = "ssh -i ${path.module}/airflow-key.pem ubuntu@${aws_instance.airflow.public_ip}"
   description = "SSH command to connect to the instance"
@@ -321,6 +347,7 @@ output "airflow_access_info" {
     Username: admin
     Password: admin123
     
+    DAGs S3 Bucket: ${aws_s3_bucket.airflow_dags.id}
     SSH Access: ssh -i terraform/airflow-key.pem ubuntu@${aws_instance.airflow.public_ip}
     =====================================
   EOT

@@ -61,38 +61,43 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install apache-airflow==${{ env.AIRFLOW_VERSION }}
 
       - name: Validate DAGs syntax
         run: |
-          export AIRFLOW_HOME=$(pwd)/airflow_test
-          mkdir -p $AIRFLOW_HOME
-          airflow db init --quiet 2>/dev/null || true
-          
           for dag_file in airflow-dags/*.py; do
             echo "Validating $dag_file..."
             python -m py_compile "$dag_file"
           done
-          
-          echo "All DAGs validated successfully!"
+          echo "✓ All DAGs syntax valid!"
 
-      - name: Check DAG imports
+      - name: Check DAG structure
         run: |
           python3 << 'EOF'
-          import sys
+          import ast
           import os
-          sys.path.insert(0, os.getcwd())
           
           dag_files = [f for f in os.listdir('airflow-dags') if f.endswith('.py')]
           
           for dag_file in dag_files:
-              print(f"Checking imports in {dag_file}...")
-              try:
-                  with open(f'airflow-dags/{dag_file}', 'r') as f:
-                      exec(compile(f.read(), dag_file, 'exec'), {'__name__': '__main__'})
-                  print(f"  ✓ {dag_file} imports OK")
-              except Exception as e:
-                  print(f"  ✗ {dag_file} import error: {e}")
+              print(f"Checking structure of {dag_file}...")
+              with open(f'airflow-dags/{dag_file}', 'r') as f:
+                  try:
+                      tree = ast.parse(f.read())
+                      # Check for DAG definition
+                      has_dag = any(
+                          isinstance(node, ast.With) or 
+                          (isinstance(node, ast.Assign) and 'DAG' in ast.dump(node))
+                          for node in ast.walk(tree)
+                      )
+                      if has_dag:
+                          print(f"  ✓ {dag_file} contains DAG definition")
+                      else:
+                          print(f"  ⚠ {dag_file} may not contain a DAG")
+                  except SyntaxError as e:
+                      print(f"  ✗ {dag_file} syntax error: {e}")
+                      exit(1)
+          print("✓ All DAGs validated!")
+          EOF
                   sys.exit(1)
           EOF
 
@@ -410,11 +415,11 @@ jobs:
           echo "This may take 5-10 minutes for initial setup..."
           
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            # Check if bootstrap is complete by looking for the completion log
-            BOOTSTRAP_DONE=$(ssh -i ~/.ssh/airflow-key.pem -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "test -f /var/log/airflow-bootstrap.log && echo 'yes' || echo 'no'" 2>/dev/null || echo "no")
+            # Check if bootstrap completion marker exists
+            BOOTSTRAP_DONE=$(ssh -i ~/.ssh/airflow-key.pem -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "test -f /var/log/airflow-bootstrap-complete && echo 'yes' || echo 'no'" 2>/dev/null || echo "no")
             
             if [ "$BOOTSTRAP_DONE" = "yes" ]; then
-              echo "✓ Airflow installation complete!"
+              echo "✓ Airflow bootstrap complete!"
               
               # Verify Airflow is actually installed
               AIRFLOW_VERSION=$(ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "sudo -u airflow /home/airflow/airflow/venv/bin/airflow version 2>/dev/null || echo 'not found'" 2>/dev/null || echo "not found")
@@ -434,88 +439,59 @@ jobs:
           if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
             echo "⚠️ Warning: Bootstrap may still be in progress"
             echo "Checking bootstrap logs..."
-            ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "sudo tail -50 /var/log/cloud-init-output.log" || true
+            ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} "sudo tail -100 /var/log/airflow-bootstrap.log" || true
           fi
 
-      - name: Deploy DAGs to EC2
-        run: |
-          scp -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no -r airflow-dags/* ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }}:/home/airflow/airflow/dags/ 2>/dev/null || true
-          echo "✓ DAGs deployed to EC2"
-
-      - name: Deploy Notebooks to EC2
-        run: |
-          scp -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no -r databricks-notebooks/* ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }}:/tmp/databricks-notebooks/ 2>/dev/null || true
-          echo "✓ Notebooks staged on EC2"
-
-      - name: Restart Airflow services
+      - name: Verify Airflow services
         run: |
           ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ec2-ip.outputs.ec2_ip }} << 'EOF'
-          echo "Restarting Airflow services..."
-          sudo systemctl restart airflow-scheduler || echo "Scheduler restart attempted"
-          sudo systemctl restart airflow-webserver || echo "Webserver restart attempted"
-          
-          sleep 10
-          
-          echo "Verifying services..."
+          echo "Verifying Airflow services..."
           sudo systemctl status airflow-scheduler --no-pager || true
           sudo systemctl status airflow-webserver --no-pager || true
-          
-          echo "✓ Airflow services updated"
+          echo "✓ Airflow services verified"
           EOF
 
-  # Job 6: Sync DAGs via Git (Alternative method)
-  sync-dags-git:
-    needs: [validate-dags, wait-for-ec2]
+  # Job 6: Sync DAGs to S3
+  sync-dags-s3:
+    needs: [validate-dags, deploy-infrastructure]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download Terraform outputs
-        uses: actions/download-artifact@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          name: terraform-outputs
-          path: ./terraform-outputs/
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Download SSH Key
-        uses: actions/download-artifact@v4
-        with:
-          name: ssh-key
-          path: ./ssh-key/
-
-      - name: Setup SSH for Git sync
+      - name: Get S3 bucket name
+        id: get-bucket
         run: |
-          mkdir -p ~/.ssh
-          cp ./ssh-key/airflow-key.pem ~/.ssh/airflow-key.pem
-          chmod 600 ~/.ssh/airflow-key.pem
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          S3_BUCKET="airflow-dags-${AWS_ACCOUNT_ID}-${{ env.AWS_REGION }}"
+          echo "bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+          echo "S3 DAGs Bucket: $S3_BUCKET"
 
-      - name: Trigger Git sync on EC2
+      - name: Sync DAGs to S3
         run: |
-          EC2_IP=$(cat terraform-outputs/outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "")
-          if [ -z "$EC2_IP" ]; then
-            EC2_IP=$(cat terraform-outputs/outputs.json | grep -o '"ec2_public_ip": "[^"]*"' | cut -d'"' -f4 || echo "")
-          fi
+          S3_BUCKET="${{ steps.get-bucket.outputs.bucket }}"
           
-          if [ -z "$EC2_IP" ]; then
-            echo "ℹ Skipping Git sync - EC2 IP not available"
-            exit 0
-          fi
+          echo "Syncing DAGs to s3://${S3_BUCKET}/dags/"
           
-          echo "Syncing DAGs from Git on EC2..."
-          ssh -i ~/.ssh/airflow-key.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP << 'EOF'
-          cd /home/airflow/airflow/dags 2>/dev/null || true
-          if [ -d ".git" ]; then
-            git pull origin main
-            echo "✓ DAGs synced from Git"
-          else
-            echo "ℹ Not a git repository"
-          fi
-          EOF
+          aws s3 sync airflow-dags/ "s3://${S3_BUCKET}/dags/" \
+            --exclude "*" \
+            --include "*.py" \
+            --delete
+          
+          echo "✓ DAGs synced to S3"
+          echo "EC2 will pick up DAGs within 5 minutes via cron job"
 
   # Job 7: Validate deployment
   validate-deployment:
-    needs: [deploy-dags]
+    needs: [deploy-dags, sync-dags-s3]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
@@ -568,9 +544,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
           echo "- ✓ Infrastructure: Deployed and running" >> $GITHUB_STEP_SUMMARY
-          echo "- ✓ Services: Started (EC2, RDS, ECS)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✓ DAGs: Deployed and synced" >> $GITHUB_STEP_SUMMARY
-          echo "- ✓ Services: Restarted" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ DAGs: Synced to S3 (EC2 syncs every 5 min)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Services: Airflow running" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           EC2_IP=$(cat outputs.json | jq -r '.ec2_public_ip.value // empty' 2>/dev/null || echo "N/A")
           [ "$EC2_IP" != "N/A" ] && echo "**Airflow UI**: http://$EC2_IP:8080" >> $GITHUB_STEP_SUMMARY

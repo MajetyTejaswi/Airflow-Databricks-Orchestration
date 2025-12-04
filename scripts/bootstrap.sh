@@ -1,23 +1,24 @@
 #!/bin/bash
-# IMPORTANT: This script runs as user_data on EC2 startup
-# Content-Type: text/x-shellscript; charset="us-ascii"
 set -ex
 
-# Redirect output to log file first
-exec > >(tee -a /var/log/airflow-bootstrap.log) 2>&1
+# Redirect output to log file
+exec > /var/log/airflow-bootstrap.log 2>&1
 
-# Wait for network to be available (not for cloud-init to finish - that causes deadlock)
-echo "Waiting for network..."
-while ! ping -c 1 -W 1 8.8.8.8 &> /dev/null; do
-    echo "Waiting for network connectivity..."
-    sleep 2
-done
-echo "Network is available"
+echo "==================================="
+echo "Bootstrap started: $(date)"
+echo "==================================="
+
+# Wait for cloud-init to finish first
+sleep 30
 
 # Wait for apt locks to be released
-while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-    echo "Waiting for apt lock to be released..."
-    sleep 5
+for i in {1..30}; do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+       ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        break
+    fi
+    echo "Waiting for apt lock... attempt $i"
+    sleep 10
 done
 
 echo "==================================="
@@ -41,7 +42,8 @@ apt-get install -y \
     vim \
     build-essential \
     libssl-dev \
-    libffi-dev
+    libffi-dev \
+    awscli
 
 echo "✓ Packages installed"
 
@@ -82,6 +84,7 @@ echo "✓ Airflow installed"
 
 echo "Installing Airflow providers..."
 pip install apache-airflow-providers-http==4.4.2
+pip install apache-airflow-providers-databricks==6.0.0
 # Fix flask-session compatibility issue
 pip install 'flask-session<0.6'
 echo "✓ Providers installed"
@@ -96,19 +99,15 @@ mkdir -p $AIRFLOW_HOME/dags
 mkdir -p $AIRFLOW_HOME/logs
 mkdir -p $AIRFLOW_HOME/plugins
 
-# Deploy DAGs from GitHub repository
-cd $AIRFLOW_HOME/dags
-echo "Downloading DAGs from GitHub..."
+# Get AWS account info for S3 bucket name
+INSTANCE_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+AWS_ACCOUNT_ID=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep accountId | awk -F'"' '{print $4}')
+S3_DAGS_BUCKET="airflow-dags-${AWS_ACCOUNT_ID}-${INSTANCE_REGION}"
 
-# Download DAG files directly from the repository
-# Using raw GitHub content URL
-GITHUB_REPO="MajetyTejaswi/Airflow-Databricks-Orchestration"
-GITHUB_BRANCH="main"
+echo "S3 DAGs Bucket: $S3_DAGS_BUCKET"
 
-# Download the DAG file
-curl -sSL "https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/airflow-dags/databricks_etl_pipeline.py" -o databricks_etl_pipeline.py || {
-  echo "Failed to download DAG from GitHub, creating placeholder..."
-  cat > databricks_etl_pipeline.py << 'DAGFILE'
+# Create placeholder DAG initially
+cat > $AIRFLOW_HOME/dags/placeholder.py << 'DAGFILE'
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -116,75 +115,76 @@ from airflow.operators.python import PythonOperator
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'email_on_failure': False,
-    'email_on_retry': False,
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
 
 with DAG(
-    'databricks_etl_pipeline',
+    'placeholder_dag',
     default_args=default_args,
-    description='Sample ETL Pipeline',
-    schedule_interval=timedelta(days=1),
+    description='Placeholder - DAGs will sync from S3',
+    schedule_interval=None,
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=['etl', 'databricks'],
+    tags=['placeholder'],
 ) as dag:
 
-    def sample_task():
-        print("Running sample ETL task")
-        return "Task completed successfully"
+    def info_task():
+        print("DAGs are synced from S3 bucket every 5 minutes")
+        return "Done"
 
     task = PythonOperator(
-        task_id='sample_etl_task',
-        python_callable=sample_task,
+        task_id='info_task',
+        python_callable=info_task,
     )
 DAGFILE
-}
 
-echo "✓ DAGs deployed"
+echo "✓ Placeholder DAG created"
 ls -la $AIRFLOW_HOME/dags/
 
 # Set proper ownership
 chown -R airflow:airflow $AIRFLOW_HOME/dags/
 
-# Create a periodic DAG sync script to pull latest from GitHub
+# Create S3 DAG sync script
 mkdir -p $AIRFLOW_HOME/scripts
-cat > $AIRFLOW_HOME/scripts/sync-dags.sh << 'SYNC_SCRIPT'
+cat > $AIRFLOW_HOME/scripts/sync-dags-s3.sh << 'SYNC_SCRIPT'
 #!/bin/bash
-# Sync DAGs from GitHub every 30 minutes
+# Sync DAGs from S3 every 5 minutes
 
 AIRFLOW_HOME=/home/airflow/airflow
 DAGS_FOLDER=$AIRFLOW_HOME/dags
 SYNC_LOG=$AIRFLOW_HOME/logs/dag-sync.log
 
-GITHUB_REPO="MajetyTejaswi/Airflow-Databricks-Orchestration"
-GITHUB_BRANCH="main"
+# Get S3 bucket name from instance metadata
+INSTANCE_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+AWS_ACCOUNT_ID=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep accountId | awk -F'"' '{print $4}')
+S3_DAGS_BUCKET="airflow-dags-${AWS_ACCOUNT_ID}-${INSTANCE_REGION}"
 
-echo "[$(date)] Starting DAG sync from GitHub..." >> $SYNC_LOG
+echo "[$(date)] Starting DAG sync from S3: s3://$S3_DAGS_BUCKET/dags/" >> $SYNC_LOG
 
-# Download latest DAG files
-cd $DAGS_FOLDER
-curl -sSL "https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/airflow-dags/databricks_etl_pipeline.py" -o databricks_etl_pipeline.py.new 2>> $SYNC_LOG
+# Sync DAGs from S3 (only .py files, delete removed files)
+aws s3 sync "s3://${S3_DAGS_BUCKET}/dags/" "$DAGS_FOLDER/" \
+    --exclude "*" \
+    --include "*.py" \
+    --delete \
+    2>> $SYNC_LOG
 
-# Check if file changed
-if ! cmp -s databricks_etl_pipeline.py databricks_etl_pipeline.py.new 2>/dev/null; then
-  mv databricks_etl_pipeline.py.new databricks_etl_pipeline.py
-  echo "[$(date)] DAG files updated - Restarting scheduler" >> $SYNC_LOG
-  sudo systemctl restart airflow-scheduler 2>&1 | tee -a $SYNC_LOG
-else
-  rm -f databricks_etl_pipeline.py.new
-  echo "[$(date)] No DAG changes detected" >> $SYNC_LOG
-fi
+# Set ownership
+chown -R airflow:airflow $DAGS_FOLDER/
 
 echo "[$(date)] DAG sync completed" >> $SYNC_LOG
+echo "[$(date)] Current DAGs:" >> $SYNC_LOG
+ls -la $DAGS_FOLDER/*.py 2>> $SYNC_LOG || echo "No DAGs found" >> $SYNC_LOG
 SYNC_SCRIPT
 
-chmod +x $AIRFLOW_HOME/scripts/sync-dags.sh
+chmod +x $AIRFLOW_HOME/scripts/sync-dags-s3.sh
 
-# Add cron job for periodic DAG sync
-(crontab -l 2>/dev/null || true; echo "*/30 * * * * $AIRFLOW_HOME/scripts/sync-dags.sh") | crontab -
+# Add cron job for periodic S3 DAG sync (every 5 minutes)
+(crontab -l 2>/dev/null | grep -v sync-dags || true; echo "*/5 * * * * $AIRFLOW_HOME/scripts/sync-dags-s3.sh") | crontab -
+
+# Run initial sync
+echo "Running initial S3 DAG sync..."
+$AIRFLOW_HOME/scripts/sync-dags-s3.sh || echo "Initial S3 sync skipped (bucket may be empty)"
 
 # Update Airflow configuration
 cat > $AIRFLOW_HOME/airflow.cfg << 'AIRFLOW_CFG'
