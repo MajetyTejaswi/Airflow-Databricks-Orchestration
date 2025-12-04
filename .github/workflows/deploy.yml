@@ -72,32 +72,32 @@ jobs:
 
       - name: Check DAG structure
         run: |
-          python3 << 'EOF'
+          python3 -c "
           import ast
           import os
+          import sys
           
           dag_files = [f for f in os.listdir('airflow-dags') if f.endswith('.py')]
           
           for dag_file in dag_files:
-              print(f"Checking structure of {dag_file}...")
+              print(f'Checking structure of {dag_file}...')
               with open(f'airflow-dags/{dag_file}', 'r') as f:
                   try:
                       tree = ast.parse(f.read())
-                      # Check for DAG definition
                       has_dag = any(
                           isinstance(node, ast.With) or 
                           (isinstance(node, ast.Assign) and 'DAG' in ast.dump(node))
                           for node in ast.walk(tree)
                       )
                       if has_dag:
-                          print(f"  ✓ {dag_file} contains DAG definition")
+                          print(f'  ✓ {dag_file} contains DAG definition')
                       else:
-                          print(f"  ⚠ {dag_file} may not contain a DAG")
+                          print(f'  ⚠ {dag_file} may not contain a DAG')
                   except SyntaxError as e:
-                      print(f"  ✗ {dag_file} syntax error: {e}")
-                      exit(1)
-          print("✓ All DAGs validated!")
-          EOF
+                      print(f'  ✗ {dag_file} syntax error: {e}')
+                      sys.exit(1)
+          print('✓ All DAGs validated!')
+          "
                   sys.exit(1)
           EOF
 
